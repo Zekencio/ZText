@@ -7,17 +7,22 @@
 #include <sys/ioctl.h>
 #include <string.h>
 
-// CURRENT STEP (TO DO): 50
+// CURRENT STEP (TO DO): 55 (Beginning of chapter 4: A text viewer)
 
 // Constants and macros
 
 #define ZTEXT_VERSION "0.1"
 #define CTRL_KEY(k) ((k) & 0x1f)
 enum editorKey{
-    ARROW_UP = 1000,
-    ARROW_LEFT,
+    ARROW_LEFT = 1000,
+    ARROW_RIGHT,
+    ARROW_UP,
     ARROW_DOWN,
-    ARROW_RIGHT 
+    DELETE_KEY,
+    HOME_KEY,
+    END_KEY,
+    PAGE_UP,
+    PAGE_DOWN
 };
 
 // Data
@@ -98,28 +103,53 @@ int readKey(){
 
         if(sequence[0] == '[')
         {
-            switch (sequence[1])
+            if(sequence[1] >= '0' && sequence[1] <= '9')
             {
-            case 'A':
-                return ARROW_UP;
-                break;
-            case 'B':
-                return ARROW_DOWN;
-                break;
-            case 'C':
-                return ARROW_RIGHT;
-                break;
-            case 'D':
-                return ARROW_LEFT;
-                break;   
+                if (read(STDIN_FILENO, &sequence[2], 1) != 1) return '\x1b';
+                if (sequence[2] == '~')
+                {
+                    switch (sequence[1])
+                    {
+                        case '1':
+                            return HOME_KEY;
+                        case '3':
+                            return DELETE_KEY;
+                        case '4':
+                            return END_KEY;
+                        case '7':
+                            return HOME_KEY;
+                        case '8':
+                            return END_KEY;
+                        case '5':
+                            return PAGE_UP;
+                        case '6':
+                            return PAGE_DOWN;
+                    }
+                }
+            }else
+            {
+                switch (sequence[1])
+                {
+                    case 'A':
+                        return ARROW_UP;
+                    case 'B':
+                        return ARROW_DOWN;
+                    case 'C':
+                        return ARROW_RIGHT;
+                    case 'D':
+                        return ARROW_LEFT;
+                    case 'H':
+                        return HOME_KEY;
+                    case 'F':
+                        return END_KEY;
+                }
             }
         }
-
         return '\x1b';
-    }else
-    {
-        return c;
     }
+
+    return c;
+
 }
 
 
@@ -241,7 +271,22 @@ void processInputs(){
             write(STDOUT_FILENO, "\x1b[2J", 4);
             write(STDOUT_FILENO, "\x1b[H", 3);
             exit(0);
+
+        case HOME_KEY:
+            editor.cx = 0;
             break;
+        case END_KEY:
+            editor.cx = editor.terminalColumns - 1;
+            break;
+        case PAGE_UP:
+        case PAGE_DOWN:
+            {
+                int times = editor.terminalRows;
+                while(times--)
+                {
+                    moveCursor(c == PAGE_UP ? ARROW_UP : ARROW_DOWN);
+                }
+            }
 
         case ARROW_UP:
         case ARROW_DOWN:
