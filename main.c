@@ -13,16 +13,20 @@
 #include <string.h>
 #include <time.h>
 #include <stdarg.h>
+#include <fcntl.h>
+#include <stdbool.h>
 
-// CURRENT STEP (TO DO): 101 (Beginning of chapter 5)
+// CURRENT STEP (TO DO): Step 131 (Beginning of chapter 6)
 
 // Constants and macros
 
 #define ZTEXT_VERSION "0.1"
 #define ZTEXT_TAB_STOP 4
+#define ZTEXT_QUIT_TIMES 2
 #define CTRL_KEY(k) ((k) & 0x1f)
 
 enum editorKey{
+    BACKSPACE = 127,
     ARROW_LEFT = 1000,
     ARROW_RIGHT,
     ARROW_UP,
@@ -57,6 +61,7 @@ struct config
     char statusMsg[80];
     time_t statusMsg_time;
     editorRow *row;
+    bool stinky;
 };
 
 struct config editor;
@@ -83,12 +88,18 @@ void initializeEditor();
 int getCursorPos(int *rows, int *columns);
 void moveCursor(int c);
 void editorOpen(char* fileName);
-void editorAppendRow(char *s, size_t len);
+void editorInsertRow(int at, char *s, size_t len);
 void editorScroll();
 void editorUpdateRow(editorRow *row);
 int editorRowCxToRx(editorRow *row, int cx);
 void drawStatusBar(struct appendBuffer *ab);
-void setStatusMessage(const char *fmt, ...) ;
+void setStatusMessage(const char *fmt, ...);
+void editorRowInsertChar(editorRow *row, int at, int c);
+void editorInsertChar(int c);
+char* editorRowsToString(int* bufLength);
+void editorFreeRow(editorRow *row);
+void editorDelRow(int at);
+char* editorPrompt(char *prompt);
 
 // Main function (entry point)
 
@@ -124,13 +135,14 @@ void initializeEditor(){
     editor.fileName = NULL;
     editor.statusMsg[0] = '\0';
     editor.statusMsg_time = 0;
+    editor.stinky = false;
 
     if(getWindowSize(&editor.terminalRows, &editor.terminalColumns) == -1){
         printEditorError("Window size error");
     }
 
     editor.terminalRows -= 2;
-    setStatusMessage("HELP: Ctrl-Q = quit");
+    setStatusMessage("HELP: Ctrl-S = save | Ctrl-Q = quit");
 }
 
 // File input/output functions
@@ -152,10 +164,65 @@ void editorOpen(char* fileName){
         {
             lineLength--;
         }
-        editorAppendRow(line, lineLength);
+        editorInsertRow(editor.numRows, line, lineLength);
     }
     free(line);
     fclose(fp);
+    editor.stinky = false;
+}
+
+char* editorRowsToString(int* bufLength) {
+    int totalLength = 0;
+    int i;
+    for (i = 0; i < editor.numRows; i++) {
+        totalLength += editor.row[i].size + 1;
+    }
+    *bufLength = totalLength;
+
+    char *buffer = malloc(totalLength);
+    char *p = buffer;
+    for (i = 0; i < editor.numRows; i++) {
+        memcpy(p, editor.row[i].chars, editor.row[i].size);
+        p += editor.row[i].size;
+        *p = '\n';
+        p++;
+    }
+
+    return buffer;
+}
+
+void editorSaveFile() {
+    if (editor.fileName == NULL)
+    {
+        editor.fileName = editorPrompt("Save file as: %s (Press ESC to cancel)");
+        if (editor.fileName == NULL)
+        {
+            setStatusMessage("Saving sequence aborted");
+            return;
+        }
+    }
+
+    int len;
+    char *buf = editorRowsToString(&len);
+    int fd = open(editor.fileName, O_RDWR | O_CREAT, 0644);
+    if (fd != -1)
+    {
+        if (ftruncate(fd, len) != -1)
+        {
+            if (write(fd, buf, len) == len)
+            {
+                close(fd);
+                free(buf);
+                editor.stinky = false;
+                setStatusMessage("Saving successful. %d bytes written on disk.", len);
+                return;
+            }
+        }
+        close(fd);
+    }
+
+    free(buf);
+    setStatusMessage("File saving aborted. I/O Error: %s", strerror(errno));
 }
 
 // Terminal functions
@@ -347,11 +414,11 @@ void editorUpdateRow(editorRow *row) {
     row->renderSize = index;
 }
 
-void editorAppendRow(char *s, size_t len) {
+void editorInsertRow(int at, char *s, size_t len) {
+    if (at < 0 || at > editor.numRows) return;
 
     editor.row = realloc(editor.row, sizeof(editorRow) * (editor.numRows + 1));
-
-    int at = editor.numRows;
+    memmove(&editor.row[at + 1], &editor.row[at], sizeof(editorRow) * (editor.numRows - at));
 
     editor.row[at].size = len;
     editor.row[at].chars = malloc(len + 1);
@@ -363,9 +430,146 @@ void editorAppendRow(char *s, size_t len) {
     editorUpdateRow(&editor.row[at]);
 
     editor.numRows++;
+    if (!editor.stinky) {
+        editor.stinky = true;
+    }
+}
+
+void editorRowInsertChar(editorRow *row, int at, int c) {
+    if (at < 0 || at > row->size) at = row->size;
+    row->chars = realloc(row->chars, row->size + 2);
+    memmove(&row->chars[at + 1], &row->chars[at], row->size - at + 1);
+    row->size++;
+    row->chars[at] = c;
+    editorUpdateRow(row);
+    if (!editor.stinky) {
+        editor.stinky = true;
+    }
+}
+
+void editorFreeRow(editorRow *row) {
+    free(row->render);
+    free(row->chars);
+}
+
+void editorDelRow(int at) {
+    if (at < 0 || at >= editor.numRows) return;
+    editorFreeRow(&editor.row[at]);
+    memmove(&editor.row[at], &editor.row[at] + 1,
+        sizeof(editorRow) * (editor.numRows - at - 1));
+    editor.numRows--;
+    if (!editor.stinky) {
+        editor.stinky = true;
+    }
+}
+
+void editorRowDelChar(editorRow *row, int at) {
+    if (at < 0 || at >= row->size) return;
+    memmove(&row->chars[at], &row->chars[at + 1], row->size - at);
+    row->size--;
+    editorUpdateRow(row);
+    if (!editor.stinky) {
+        editor.stinky = true;
+    }
+}
+
+void editorRowAppendString(editorRow *row, char *s, size_t len) {
+    row->chars = realloc(row->chars, row->size + len + 1);
+    memcpy(&row->chars[row->size], s, len);
+    row->size += len;
+    row->chars[row->size] = '\0';
+    editorUpdateRow(row);
+    if (!editor.stinky) {
+        editor.stinky = true;
+    }
+}
+
+// Editor operations
+
+void editorInsertChar(int c){
+    if (editor.cy == editor.numRows) editorInsertRow(editor.numRows,"", 0);
+    editorRowInsertChar(&editor.row[editor.cy], editor.cx, c);
+    editor.cx++;
+}
+
+void editorInsertNewLine() {
+    if (editor.cx == 0)
+    {
+        editorInsertRow(editor.cy, "", 0);
+    }else
+    {
+        editorRow *row = &editor.row[editor.cy];
+        editorInsertRow(editor.cy + 1, &row->chars[editor.cx], row->size - editor.cx);
+        row = &editor.row[editor.cy];
+        row->size = editor.cx;
+        row->chars[row->size] = '\0';
+        editorUpdateRow(row);
+    }
+    editor.cy++;
+    editor.cx = 0;
+}
+
+void editorDelChar() {
+    if (editor.cy == editor.numRows) return;
+    if (editor.cx == 0 && editor.cy == 0) return;
+
+    editorRow *row = &editor.row[editor.cy];
+    if (editor.cx > 0)
+    {
+        editorRowDelChar(row, editor.cx - 1);
+        editor.cx--;
+    }else
+    {
+        editor.cx = editor.row[editor.cy - 1].size;
+        editorRowAppendString(&editor.row[editor.cy - 1], row->chars, row->size);
+        editorDelRow(editor.cy);
+        editor.cy--;
+    }
 }
 
 // Input functions
+
+char* editorPrompt(char *prompt) {
+    size_t bufSize = 128;
+    char *buf = malloc(bufSize);
+
+    size_t bufLength = 0;
+    buf[0] = '\0';
+
+    while (true)
+    {
+        setStatusMessage(prompt, buf);
+        refreshScreen();
+
+        int c = readKey();
+
+        if (c == DELETE_KEY || c == CTRL_KEY('h') || c == BACKSPACE)
+        {
+            if (bufLength != 0) buf[--bufLength] = '\0';
+        }else if (c == '\x1b')
+        {
+            setStatusMessage("");
+            free(buf);
+            return NULL;
+        }else if (c == '\r')
+        {
+            if (bufLength != 0)
+            {
+                setStatusMessage("");
+                return buf;
+            }
+        }else if (!iscntrl(c) && c < 128)
+        {
+            if (bufLength == bufSize - 1)
+            {
+                bufSize *= 2;
+                buf = realloc(buf, bufSize);
+            }
+            buf[bufLength++] = c;
+            buf[bufLength] = '\0';
+        }
+    }
+}
 
 void moveCursor(int c){
 
@@ -414,21 +618,40 @@ void moveCursor(int c){
 }
 
 void processInputs(){
+    static int quit_times = ZTEXT_QUIT_TIMES;
 
     int c = readKey();
 
     switch (c)
     {
+        case '\r':
+            editorInsertNewLine();
+            break;
         case CTRL_KEY('q'):
+            if (editor.stinky && quit_times > 0) {
+                setStatusMessage("WARNING! File has unsaved changes."
+                    "Press Ctrl-Q %d more time(s) to quit", quit_times);
+                quit_times--;
+                return;
+            }
             write(STDOUT_FILENO, "\x1b[2J", 4);
             write(STDOUT_FILENO, "\x1b[H", 3);
             exit(0);
+        case CTRL_KEY('s'):
+            editorSaveFile();
+            break;
         case HOME_KEY:
             editor.cx = 0;
             break;
         case END_KEY:
             if (editor.cy < editor.numRows)
                 editor.cx = editor.row[editor.cy].size;
+            break;
+        case BACKSPACE:
+        case CTRL_KEY('h'):
+        case DELETE_KEY:
+            if (c == DELETE_KEY) moveCursor(ARROW_RIGHT);
+            editorDelChar();
             break;
         case PAGE_UP:
         case PAGE_DOWN:
@@ -448,13 +671,22 @@ void processInputs(){
                     moveCursor(c == PAGE_UP ? ARROW_UP : ARROW_DOWN);
                 }
             }
+            break;
         case ARROW_UP:
         case ARROW_DOWN:
         case ARROW_LEFT:
         case ARROW_RIGHT:
             moveCursor(c);
             break;
+        case CTRL_KEY('l'):
+        case '\x1b':
+            break;
+        default:
+            editorInsertChar(c);
+            break;
     }
+
+    quit_times = ZTEXT_QUIT_TIMES;
 }
 
 // Appending the buffer
@@ -521,8 +753,9 @@ void drawRows(struct appendBuffer *ab){
 void drawStatusBar(struct appendBuffer *ab) {
     abAppend(ab, "\x1b[7m", 4);
     char status[80], rstatus[80];
-    int len = snprintf(status, sizeof(status), "%.20s - %d lines",
-      editor.fileName ? editor.fileName : "[No Name]", editor.numRows);
+    int len = snprintf(status, sizeof(status), "%.20s - %d lines %s",
+      editor.fileName ? editor.fileName : "[No Name]", editor.numRows,
+      editor.stinky ? "(modified)" : "");
     int rlen = snprintf(rstatus, sizeof(rstatus), "%d/%d",
       editor.cy + 1, editor.numRows);
     if (len > editor.terminalColumns) len = editor.terminalColumns;
